@@ -72,6 +72,12 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 
+/** Repo that publishes this build: its release feed is the update API. */
+internal const val UPDATE_REPO = "shensl4499/YTXTube"
+
+private const val LATEST_RELEASE_API =
+    "https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest"
+
 @Immutable
 data class UpdateInfo(
     val version: String,
@@ -201,7 +207,7 @@ class UpdateState(private val scope: CoroutineScope) {
 
     private fun fetchLatest(): UpdateInfo? {
         val request = Request.Builder()
-            .url("https://api.github.com/repos/Koustubh12345/YTXTube/releases/latest")
+            .url(LATEST_RELEASE_API)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "YTXTube/${BuildConfig.VERSION_NAME}")
             .build()
