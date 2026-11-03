@@ -27,6 +27,13 @@ android {
     }
 
     buildTypes {
+        // Diagnostic builds install alongside the release APK (different applicationId) so
+        // the user's signed-in install is left untouched.
+        debug {
+            applicationIdSuffix = ".diag"
+            versionNameSuffix = "-diag"
+        }
+
         release {
 
             isMinifyEnabled = true

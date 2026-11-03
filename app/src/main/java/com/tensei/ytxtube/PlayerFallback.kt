@@ -24,6 +24,14 @@ object PlayerFallback {
 
     private val cache = ConcurrentHashMap<String, Cached>()
 
+    /** Index of the client to try first on the next attempt for a video, so retries rotate. */
+    private val nextStart = ConcurrentHashMap<String, Int>()
+
+    /** Drop any rescued response for [videoId], forcing the next lookup to hit YouTube again. */
+    fun invalidate(videoId: String) {
+        cache.remove(videoId)
+    }
+
     fun handles(url: String) = "/youtubei/v1/reel/reel_item_watch" in url ||
         "/youtubei/v1/player" in url ||
         "/watch" in url
@@ -131,7 +139,12 @@ object PlayerFallback {
             ),
         )
 
-        for (cfg in clients) {
+        // Only a fully failed round rotates the starting client, so the first attempt keeps the
+        // upstream order and a retry does not repeat the request that just failed.
+        val start = (nextStart[videoId] ?: 0).mod(clients.size)
+        val ordered = clients.drop(start) + clients.take(start)
+
+        for (cfg in ordered) {
             val answer = runCatching { ask(videoId, cfg) }
                 .onFailure { Log.w(TAG, "Fallback ${cfg.name} request failed for $videoId", it) }
                 .getOrNull() ?: continue
@@ -143,6 +156,7 @@ object PlayerFallback {
             Log.w(TAG, "Fallback ${cfg.name} had no streams for $videoId " +
                 "(status=${answer.optJSONObject("playabilityStatus")?.optString("status")})")
         }
+        nextStart[videoId] = (start + 1).mod(clients.size)
         return null
     }
 
@@ -176,6 +190,11 @@ object PlayerFallback {
     private fun isPlayable(player: JSONObject): Boolean {
         val status = player.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
         if (!status.equals("OK", ignoreCase = true)) return false
+        return hasPlayableStreams(player)
+    }
+
+    /** True when the player response actually carries a rendition the extractor can read. */
+    private fun hasPlayableStreams(player: JSONObject): Boolean {
         val streaming = player.optJSONObject("streamingData") ?: return false
         if (streaming.optString("hlsManifestUrl").isNotBlank()) return true
         if ((streaming.optJSONArray("formats")?.length() ?: 0) > 0) return true
@@ -189,7 +208,10 @@ object PlayerFallback {
             val status = player.optJSONObject("playabilityStatus")
             val code = status?.optString("status").orEmpty()
             val reason = status?.optString("reason").orEmpty().lowercase()
-            if (code.equals("OK", ignoreCase = true)) return false
+            // An "OK" response that carries no rendition at all (SABR-only or a truncated
+            // answer) is just as unplayable as an explicit gate, and has to reach the client
+            // fallbacks below instead of being handed back to the extractor as-is.
+            if (code.equals("OK", ignoreCase = true)) return !hasPlayableStreams(player)
             if (code.equals("LOGIN_REQUIRED", true) ||
                 code.equals("UNPLAYABLE", true) ||
                 code.equals("ERROR", true) ||

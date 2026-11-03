@@ -79,6 +79,7 @@ class NewPipeDownloader private constructor(private val client: OkHttpClient) : 
 
             if (response.code == 429) throw ReCaptchaException("reCaptcha challenge requested", request.url())
             val text = response.body?.string()
+            Diag.playerResponse(request.url(), text)
             return Response(
                 response.code,
                 response.message,

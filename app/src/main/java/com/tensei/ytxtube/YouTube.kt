@@ -390,6 +390,11 @@ object YouTube {
                 "This is a members-only video. YTXTube can't play members-only videos yet."
             else "This video isn't available."
         is ReCaptchaException -> "YouTube is rate-limiting requests right now. Try again in a minute."
+        // A gated player response usually surfaces as this instead of SignInConfirmNotBotException,
+        // because the extractor only sees that no rendition was returned.
+        is StreamInfo.StreamExtractException,
+        is org.schabi.newpipe.extractor.exceptions.ParsingException,
+        -> "YouTube is restricting this video on the current network. Try again in a moment, or switch networks."
         is IOException -> "Couldn't reach YouTube. Check your connection."
         else -> "Something went wrong loading this. Try again."
     }
@@ -423,29 +428,13 @@ object StreamCache {
 
     private val inflight = ConcurrentHashMap<String, FutureTask<StreamInfo>>()
 
+    /** Extra attempts after the first one; YouTube's bot gate is transient and worth a retry. */
+    private const val RETRY_ATTEMPTS = 2
+    private const val RETRY_BACKOFF_MS = 700L
+
     fun getOrLoad(id: String): StreamInfo {
         get(id)?.let { return it }
-        val mine = FutureTask {
-            try {
-                StreamInfo.getInfo(ServiceList.YouTube, YouTube.watchUrl(id)).also {
-                    entries[id] = Entry(it, System.currentTimeMillis())
-                    Net.noteMediaHost(StreamSelection.pick(it).let { p -> (p.video ?: p.muxed)?.content })
-                    CaptionTracks.put(id, CaptionTracks.fromStreamInfo(it))
-                    if (it.subtitles.isEmpty()) runCatching { CaptionTracks.load(id) }
-                }
-            } catch (t: Throwable) {
-                if (t is org.schabi.newpipe.extractor.exceptions.SignInConfirmNotBotException) {
-
-                    entries.remove(id)
-                    StreamInfo.getInfo(ServiceList.YouTube, YouTube.watchUrl(id)).also {
-                        entries[id] = Entry(it, System.currentTimeMillis())
-                        Net.noteMediaHost(StreamSelection.pick(it).let { p -> (p.video ?: p.muxed)?.content })
-                        CaptionTracks.put(id, CaptionTracks.fromStreamInfo(it))
-                        if (it.subtitles.isEmpty()) runCatching { CaptionTracks.load(id) }
-                    }
-                } else throw t
-            }
-        }
+        val mine = FutureTask<StreamInfo> { loadWithRetry(id) }
         val running = inflight.putIfAbsent(id, mine)
         val task = running ?: mine.also { it.run() }
         try {
@@ -455,6 +444,41 @@ object StreamCache {
         } finally {
             if (running == null) inflight.remove(id, mine)
         }
+    }
+
+    private fun loadWithRetry(id: String): StreamInfo {
+        var last: Throwable? = null
+        for (attempt in 0..RETRY_ATTEMPTS) {
+            try {
+                return load(id)
+            } catch (t: Throwable) {
+                last = t
+                if (attempt == RETRY_ATTEMPTS || !retryable(t)) throw t
+                // Drop the cached entry and any rescued player response, so the next attempt is a
+                // genuinely new request (and rotates the fallback client) instead of a replay.
+                entries.remove(id)
+                PlayerFallback.invalidate(id)
+                runCatching { Thread.sleep(RETRY_BACKOFF_MS * (attempt + 1)) }
+            }
+        }
+        throw last ?: IllegalStateException("no attempt made for $id")
+    }
+
+    private fun load(id: String): StreamInfo =
+        StreamInfo.getInfo(ServiceList.YouTube, YouTube.watchUrl(id)).also {
+            entries[id] = Entry(it, System.currentTimeMillis())
+            Net.noteMediaHost(StreamSelection.pick(it).let { p -> (p.video ?: p.muxed)?.content })
+            CaptionTracks.put(id, CaptionTracks.fromStreamInfo(it))
+            if (it.subtitles.isEmpty()) runCatching { CaptionTracks.load(id) }
+        }
+
+    private fun retryable(t: Throwable): Boolean = when (t) {
+        is org.schabi.newpipe.extractor.exceptions.SignInConfirmNotBotException,
+        is StreamInfo.StreamExtractException,
+        is org.schabi.newpipe.extractor.exceptions.ParsingException,
+        -> true
+
+        else -> false
     }
 
 
